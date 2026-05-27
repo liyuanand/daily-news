@@ -43,8 +43,7 @@ RSSHUB_BASE = os.environ.get("RSSHUB_BASE", "https://rsshub.app")
 
 RSS_FEEDS: Dict[str, str] = {
     # ──── AI 前沿观察 ────
-    "TechCrunch AI": "https://techcrunch.com/tag/artificial-intelligence/feed/",
-    "机器之心": "https://www.jiqizhixin.com/rss",
+    "AIHOT": "https://aihot.virxact.com/feed",
 
     # ──── 国内政策速递 ────
     "人民网 时政": f"{RSSHUB_BASE}/people/xjp",       # 习近平重要活动
@@ -109,7 +108,7 @@ def fetch_all_news() -> Dict[str, List[Dict[str, str]]]:
 
     for name, url in RSS_FEEDS.items():
         articles = fetch_source(name, url)
-        if "TechCrunch" in name or "机器之心" in name:
+        if "AIHOT" in name:
             sections["ai"].extend(articles)
         elif "人民网" in name:
             sections["policy"].extend(articles)
