@@ -13,9 +13,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-
 import requests
 from weasyprint import HTML
 
@@ -84,10 +81,10 @@ def fetch_daily() -> Dict[str, Any]:
     return data
 
 
-def fetch_cls_telegraph() -> List[Dict[str, str]]:
-    """获取财联社电报过去 2 小时快讯（RSSHub）"""
-    url = "https://rsshub.app/cls/telegraph"
-    logger.info("请求财联社电报: %s", url)
+def fetch_finance_flash() -> List[Dict[str, str]]:
+    """获取国内政策与股市快讯（华尔街见闻 7x24 公开 API，无需鉴权）"""
+    url = "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=50"
+    logger.info("请求华尔街见闻快讯: %s", url)
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -97,39 +94,35 @@ def fetch_cls_telegraph() -> List[Dict[str, str]]:
     }
     resp = requests.get(url, headers=headers, timeout=15)
     resp.raise_for_status()
+    raw = resp.json()
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).timestamp()
     items: List[Dict[str, str]] = []
-    root = ET.fromstring(resp.content)
 
-    for item in root.iter("item"):
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        desc = (item.findtext("description") or "").strip()
-        pub_raw = item.findtext("pubDate") or ""
-
-        if not title:
+    for item in raw.get("data", {}).get("items", []):
+        display_time = item.get("display_time", 0)
+        if display_time < cutoff_ts:
             continue
 
-        published = ""
-        if pub_raw:
-            try:
-                pub_dt = parsedate_to_datetime(pub_raw)
-                if pub_dt < cutoff:
-                    continue
-                published = pub_dt.astimezone(BJT).strftime("%m/%d %H:%M")
-            except Exception:
-                published = ""
+        content_text = (item.get("content_text") or "").strip()
+        if not content_text:
+            continue
+
+        # 取第一段作为标题
+        title = content_text[:80].rsplit(" ", 1)[0] + "…" if len(content_text) > 80 else content_text
+
+        dt = datetime.fromtimestamp(display_time, tz=timezone.utc)
+        published = dt.astimezone(BJT).strftime("%m/%d %H:%M")
 
         items.append({
-            "source": "财联社",
+            "source": "华尔街见闻",
             "title": title,
-            "link": link,
-            "summary": desc,
+            "link": "https://wallstreetcn.com/live/global",
+            "summary": content_text,
             "publishedAt": published,
         })
 
-    logger.info("财联社电报: 获取到 %d 条", len(items))
+    logger.info("华尔街见闻快讯: 获取到 %d 条", len(items))
     return items
 
 
@@ -346,7 +339,7 @@ def main():
 
     if args.mode == "interval":
         items = fetch_interval()
-        cls_items = fetch_cls_telegraph()
+        cls_items = fetch_finance_flash()
         generate_pdf_interval(items, cls_items)
     else:
         data = fetch_daily()
