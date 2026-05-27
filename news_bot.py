@@ -13,6 +13,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+
 import requests
 from weasyprint import HTML
 
@@ -79,6 +82,48 @@ def fetch_daily() -> Dict[str, Any]:
         len(data.get("flashes", [])),
     )
     return data
+
+
+def fetch_cls_telegraph() -> List[Dict[str, str]]:
+    """获取财联社电报过去 2 小时快讯（RSSHub）"""
+    url = "https://rsshub.app/cls/telegraph"
+    logger.info("请求财联社电报: %s", url)
+    resp = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+    resp.raise_for_status()
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    items: List[Dict[str, str]] = []
+    root = ET.fromstring(resp.content)
+
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        desc = (item.findtext("description") or "").strip()
+        pub_raw = item.findtext("pubDate") or ""
+
+        if not title:
+            continue
+
+        published = ""
+        if pub_raw:
+            try:
+                pub_dt = parsedate_to_datetime(pub_raw)
+                if pub_dt < cutoff:
+                    continue
+                published = pub_dt.astimezone(BJT).strftime("%m/%d %H:%M")
+            except Exception:
+                published = ""
+
+        items.append({
+            "source": "财联社",
+            "title": title,
+            "link": link,
+            "summary": desc,
+            "publishedAt": published,
+        })
+
+    logger.info("财联社电报: 获取到 %d 条", len(items))
+    return items
 
 
 # ====== 时间格式化 ======
@@ -177,23 +222,40 @@ def _build_cards(items: List[Dict], *, show_cat_label: bool = False) -> str:
     return html
 
 
-def generate_pdf_interval(items: List[Dict[str, Any]]) -> str:
+def generate_pdf_interval(
+    items: List[Dict[str, Any]],
+    cls_items: List[Dict[str, str]] = None,
+) -> str:
     """生成 interval 模式 PDF"""
     now = datetime.now(BJT)
     ts = now.strftime("%Y-%m-%d %H:%M")
-    total = len(items)
+    total = len(items) + len(cls_items or [])
 
-    # 按 category 分组
+    # AIHOT — 按 category 分组
+    body = ""
     grouped: Dict[str, list] = {}
     for it in items:
         cat = it.get("category") or "uncategorized"
         grouped.setdefault(cat, []).append(it)
-
-    body = ""
     for cat, cat_items in grouped.items():
         label = CATEGORY_LABEL.get(cat, cat)
         body += f'<div class="section-title">{label}（{len(cat_items)}）</div>\n'
         body += _build_cards(cat_items)
+
+    # 财联社电报板块
+    if cls_items:
+        body += f'<div class="section-title">🇨🇳 国内政策与股市快讯（{len(cls_items)}）</div>\n'
+        for it in cls_items:
+            title = it.get("title", "无标题")
+            url = it.get("link", "")
+            summary = it.get("summary", "")
+            meta = it.get("publishedAt", "")
+            body += f"""<div class="card">
+<div class="card-title"><a href="{url}">{title}</a></div>
+<div class="card-meta">财联社 · {meta}</div>
+<div class="card-summary">{summary}</div>
+</div>
+"""
 
     if not body:
         body = '<div class="empty">⏳ 过去 2 小时内暂无新动态</div>'
@@ -277,7 +339,8 @@ def main():
 
     if args.mode == "interval":
         items = fetch_interval()
-        generate_pdf_interval(items)
+        cls_items = fetch_cls_telegraph()
+        generate_pdf_interval(items, cls_items)
     else:
         data = fetch_daily()
         generate_pdf_daily(data)
