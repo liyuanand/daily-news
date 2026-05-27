@@ -43,6 +43,11 @@ CATEGORY_LABEL = {
 BJT = timezone(timedelta(hours=8))
 PDF_FILENAME = "AI_Report.pdf"
 
+# ====== 高亮关键词 ======
+
+POLICY_WORDS = ["芯片", "半导体", "国务院", "降准", "红头文件"]
+AI_WORDS = ["OpenAI", "Sora", "Agent", "智能体", "大模型"]
+
 # ====== API 获取 ======
 
 
@@ -140,6 +145,20 @@ def fmt_time(iso: str) -> str:
         return iso
 
 
+# ====== 关键词高亮 ======
+
+
+def highlight_text(text: str) -> str:
+    """在纯文本中对 POLICY_WORDS / AI_WORDS 做 <span> 高亮标记"""
+    if not text:
+        return ""
+    for w in POLICY_WORDS:
+        text = text.replace(w, f'<span class="highlight-keyword">{w}</span>')
+    for w in AI_WORDS:
+        text = text.replace(w, f'<span class="highlight-tech">{w}</span>')
+    return text
+
+
 # ====== HTML → PDF ======
 
 HTML_HEAD = """<!DOCTYPE html>
@@ -147,46 +166,79 @@ HTML_HEAD = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <style>
-  @page { size: A4; margin: 18mm 14mm; }
+  @page { size: A4; margin: 20mm 16mm; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    font-family: 'Noto Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;
-    font-size: 10.5pt; line-height: 1.8; color: #1e1e2a;
+    font-family: Georgia, 'SimSun', 'Songti SC', 'Noto Serif SC', serif;
+    font-size: 10pt; line-height: 1.5; color: #1a1a1a; background: #FCFBF9;
   }
-  .header {
-    background: linear-gradient(135deg, #0b1830 0%, #132347 50%, #0d2b55 100%);
-    color: #fff; padding: 28px 36px; border-radius: 6px; margin-bottom: 22px;
+
+  /* ===== WSJ 报头 ===== */
+  .masthead { text-align: center; margin-bottom: 16px; }
+  .masthead-rule { border-top: 3px double #111; height: 5px; margin: 6px 0; }
+  .masthead-title {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 24pt; font-weight: 700; color: #111;
+    letter-spacing: 2.5px; margin: 6px 0 2px;
   }
-  .header h1 { font-size: 22pt; font-weight: 700; letter-spacing: 1px; }
-  .header .meta { font-size: 9.5pt; opacity: .82; margin-top: 6px; }
+  .masthead-sub {
+    font-size: 9pt; color: #666; font-family: Georgia, serif;
+    font-style: italic; letter-spacing: 1px;
+  }
+
+  /* ===== 主编导语 ===== */
   .lead {
-    background: #f0f4fe; border-left: 4px solid #0b1830;
-    padding: 12px 16px; margin-bottom: 20px;
-    font-size: 10pt; line-height: 1.7; color: #2a2a3e;
+    background: #f5f3f0; border-left: 3px solid #A82315;
+    padding: 10px 14px; margin-bottom: 16px;
+    font-size: 9.5pt; line-height: 1.6; color: #333;
+    font-style: italic; font-family: Georgia, serif;
   }
+
+  /* ===== 板块标题（酒红色） ===== */
   .section-title {
-    font-size: 13pt; font-weight: 700; color: #0b1830;
-    border-bottom: 2px solid #0b1830; padding-bottom: 3px;
-    margin-top: 18px; margin-bottom: 10px;
+    font-size: 11.5pt; font-weight: 700; color: #A82315;
+    border-bottom: 1px solid #d5d0c8; padding-bottom: 3px;
+    margin-top: 16px; margin-bottom: 8px;
+    font-family: Georgia, 'SimSun', serif;
   }
+
+  /* ===== 新闻卡片（极简报纸风） ===== */
   .card {
-    background: #f7f9fc; border: 1px solid #e4e9f0;
-    border-radius: 5px; padding: 10px 14px; margin-bottom: 7px;
+    background: transparent; border: none;
+    border-bottom: 1px solid #ece8e2; padding: 7px 0; margin: 0;
     page-break-inside: avoid;
   }
-  .card-title { font-size: 11pt; font-weight: 600; color: #0b1830; margin-bottom: 2px; }
-  .card-title a { color: #0b1830; text-decoration: none; }
-  .card-meta { font-size: 8.5pt; color: #7a7a8a; margin-bottom: 4px; }
-  .card-summary { font-size: 9.5pt; color: #3a3a4e; line-height: 1.7; }
-  .flash-item {
-    font-size: 9.5pt; color: #3a3a4e;
-    padding: 4px 0; border-bottom: 1px dashed #e4e9f0;
+  .card-title { font-size: 10.5pt; font-weight: 600; color: #1a1a1a; margin-bottom: 1px; }
+  .card-title a { color: #1a1a1a; text-decoration: none; }
+  .card-meta {
+    font-size: 8pt; color: #999; font-family: Georgia, serif;
+    font-style: italic; margin-bottom: 2px;
   }
-  .empty { color: #999; font-size: 10pt; padding: 12px 0; }
+  .card-summary { font-size: 9pt; color: #3a3a3a; line-height: 1.55; }
+
+  /* ===== 快讯 ===== */
+  .flash-item {
+    font-size: 9pt; color: #3a3a3a;
+    padding: 3px 0; border-bottom: 1px dashed #d5d0c8;
+  }
+
+  /* ===== 高亮标记 ===== */
+  .highlight-keyword {
+    background: #fce8e6; color: #A82315; font-weight: 700;
+    padding: 0 2px; font-style: normal;
+  }
+  .highlight-tech {
+    background: #e3f0ff; color: #1a5c9e; font-weight: 700;
+    padding: 0 2px; font-style: normal;
+  }
+
+  .empty { color: #aaa; font-size: 10pt; padding: 12px 0; font-style: italic; }
+
+  /* ===== 页脚 ===== */
   .footer {
-    margin-top: 24px; padding-top: 10px;
-    border-top: 1px solid #d0d5dd; text-align: center;
-    font-size: 8.5pt; color: #999;
+    margin-top: 20px; padding-top: 8px; border-top: 1px solid #d5d0c8;
+    text-align: center; font-size: 8pt; color: #999;
+    font-family: Georgia, serif; font-style: italic;
   }
 </style>
 </head>
@@ -194,15 +246,14 @@ HTML_HEAD = """<!DOCTYPE html>
 """
 
 HTML_TAIL = """<div class="footer">
-  Generated by <strong>AI HOT</strong> &nbsp;·&nbsp; aihot.virxact.com &nbsp;·&nbsp;
-  本报告由机器人自动生成
+  The Personal Decision Briefing &nbsp;·&nbsp; Generated by AI HOT &nbsp;·&nbsp; aihot.virxact.com
 </div>
 </body>
 </html>"""
 
 
 def _build_cards(items: List[Dict], *, show_cat_label: bool = False) -> str:
-    """构建一组卡片 HTML"""
+    """构建一组卡片 HTML（含自动关键词高亮）"""
     html = ""
     for it in items:
         title = it.get("title") or "无标题"
@@ -214,9 +265,9 @@ def _build_cards(items: List[Dict], *, show_cat_label: bool = False) -> str:
         meta_parts = [s for s in [source, published, CATEGORY_LABEL.get(cat, "")] if s]
         meta = " · ".join(meta_parts) if meta_parts else ""
         html += f"""<div class="card">
-<div class="card-title"><a href="{url}">{title}</a></div>
+<div class="card-title"><a href="{url}">{highlight_text(title)}</a></div>
 <div class="card-meta">{meta}</div>
-<div class="card-summary">{summary}</div>
+<div class="card-summary">{highlight_text(summary)}</div>
 </div>
 """
     return html
@@ -242,7 +293,7 @@ def generate_pdf_interval(
         body += f'<div class="section-title">{label}（{len(cat_items)}）</div>\n'
         body += _build_cards(cat_items)
 
-    # 财联社电报板块
+    # 财经快讯板块
     if cls_items:
         body += f'<div class="section-title">🇨🇳 国内政策与股市快讯（{len(cls_items)}）</div>\n'
         for it in cls_items:
@@ -251,9 +302,9 @@ def generate_pdf_interval(
             summary = it.get("summary", "")
             meta = it.get("publishedAt", "")
             body += f"""<div class="card">
-<div class="card-title"><a href="{url}">{title}</a></div>
-<div class="card-meta">财联社 · {meta}</div>
-<div class="card-summary">{summary}</div>
+<div class="card-title"><a href="{url}">{highlight_text(title)}</a></div>
+<div class="card-meta">华尔街见闻 · {meta}</div>
+<div class="card-summary">{highlight_text(summary)}</div>
 </div>
 """
 
@@ -262,9 +313,11 @@ def generate_pdf_interval(
 
     html = (
         HTML_HEAD
-        + f"""<div class="header">
-<h1>🤖 AI HOT · 动态速报</h1>
-<div class="meta">{ts} 更新 · 过去 2 小时 · 共 {total} 条</div>
+        + f"""<div class="masthead">
+<div class="masthead-rule"></div>
+<h1 class="masthead-title">THE PERSONAL DECISION BRIEFING</h1>
+<div class="masthead-sub">{ts} · 动态速报 · 共 {total} 条</div>
+<div class="masthead-rule"></div>
 </div>
 {body}"""
         + HTML_TAIL
@@ -306,9 +359,11 @@ def generate_pdf_daily(data: Dict[str, Any]) -> str:
 
     html = (
         HTML_HEAD
-        + f"""<div class="header">
-<h1>📰 AI HOT · AI 日报</h1>
-<div class="meta">{date_str}</div>
+        + f"""<div class="masthead">
+<div class="masthead-rule"></div>
+<h1 class="masthead-title">THE PERSONAL DECISION BRIEFING</h1>
+<div class="masthead-sub">{date_str} · AI 日报</div>
+<div class="masthead-rule"></div>
 </div>
 {lead_html}
 {body}"""
