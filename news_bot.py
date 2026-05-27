@@ -88,7 +88,14 @@ def fetch_cls_telegraph() -> List[Dict[str, str]]:
     """获取财联社电报过去 2 小时快讯（RSSHub）"""
     url = "https://rsshub.app/cls/telegraph"
     logger.info("请求财联社电报: %s", url)
-    resp = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+    resp = requests.get(url, headers=headers, timeout=15)
     resp.raise_for_status()
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
