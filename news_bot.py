@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-全球每日早报推送机器人（定制版）
-- 垂直数据源：AI 前沿 / 国内政策 / A股市场
-- 调用 DeepSeek V4 (OpenAI 兼容模式) 分板块智能总结
-- 钉钉富媒体排版（封面图 + 大盘走势图）
+AI HOT 双轨 PDF 新闻推送机器人
+- --mode interval：每 2 小时抓取过去 2 小时的 AI 动态
+- --mode daily：抓取当天 AI 日报
+- 生成精美中文 PDF 供邮件发送
 """
 
 import os
 import sys
-import random
+import argparse
 import logging
-from datetime import date
-from typing import List, Dict
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any
 
-import feedparser
 import requests
-from openai import OpenAI
-
-# ==================== 日志配置 ====================
+from weasyprint import HTML
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,302 +23,266 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== 环境变量配置 ====================
-# 敏感信息仅从系统环境变量读取，绝不硬编码
+# ====== 常量 ======
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
-DEEPSEEK_BASE_URL = os.environ.get(
-    "DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
+AIHOT_BASE = "https://aihot.virxact.com"
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36 aihot-skill/0.2.0"
 )
-DINGTALK_WEBHOOK_URL = os.environ.get("DINGTALK_WEBHOOK_URL")
 
-# RSSHub 公共实例地址（如网络受限可换成自建地址）
-RSSHUB_BASE = os.environ.get("RSSHUB_BASE", "https://rsshub.app")
-
-# ==================== RSS 数据源 ====================
-# 按三大板块分类，可从环境变量覆盖
-
-RSS_FEEDS: Dict[str, str] = {
-    # ──── AI 前沿观察 ────
-    "AIHOT": "https://aihot.virxact.com/feed",
-
-    # ──── 国内政策速递 ────
-    "人民网 时政": f"{RSSHUB_BASE}/people/xjp",       # 习近平重要活动
-    "人民网 政策": f"{RSSHUB_BASE}/people/policy",      # 政策文件解读
-
-    # ──── A股市场风向 ────
-    "财联社 电报": f"{RSSHUB_BASE}/cls/telegraph",
-    "东方财富 要闻": f"{RSSHUB_BASE}/eastmoney",
+CATEGORY_LABEL = {
+    "ai-models": "模型发布/更新",
+    "ai-products": "产品发布/更新",
+    "industry": "行业动态",
+    "paper": "论文研究",
+    "tip": "技巧与观点",
 }
 
-# 每个源最多取的文章数
-MAX_ARTICLES_PER_SOURCE = 5
+BJT = timezone(timedelta(hours=8))
+PDF_FILENAME = "AI_Report.pdf"
 
-# ==================== 封面图 / 大盘图 ====================
-
-COVER_IMAGES = [
-    # 科技金融主题 Unsplash 图片（使用稳定 photo ID）
-    "https://images.unsplash.com/photo-1504639725590-34d0984388bd?w=800&h=400&fit=crop&auto=format",
-    "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=800&h=400&fit=crop&auto=format",
-    "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&h=400&fit=crop&auto=format",
-    "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=800&h=400&fit=crop&auto=format",
-]
-
-# A 股大盘走势图（新浪财经公开接口）
-STOCK_CHART_URL = "http://image.sinajs.cn/newchart/daily/n/sh000001.gif"
+# ====== API 获取 ======
 
 
-# ==================== RSS 获取 ====================
+def fetch_interval() -> List[Dict[str, Any]]:
+    """获取过去 2 小时的全部 AI 动态"""
+    since = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    url = f"{AIHOT_BASE}/api/public/items?mode=all&since={since}&take=100"
+    logger.info("请求 interval API: %s", url)
+    resp = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+    resp.raise_for_status()
+    items = resp.json().get("items", [])
+    logger.info("获取到 %d 条动态", len(items))
+    return items
 
-def fetch_source(source: str, url: str) -> List[Dict[str, str]]:
-    """获取单个 RSS 源的新闻列表"""
-    articles: List[Dict[str, str]] = []
+
+def fetch_daily() -> Dict[str, Any]:
+    """获取当天 AI 日报（北京 08:00 还未生成时自动降级到昨天）"""
+    url = f"{AIHOT_BASE}/api/public/daily"
+    logger.info("请求 daily API: %s", url)
+    resp = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+    if resp.status_code == 404:
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        fallback = f"{AIHOT_BASE}/api/public/daily/{yesterday}"
+        logger.warning("当日日报尚未生成，降级到: %s", fallback)
+        resp = requests.get(fallback, headers={"User-Agent": UA}, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    logger.info(
+        "日报日期: %s, 板块: %d, 快讯: %d",
+        data.get("date"),
+        len(data.get("sections", [])),
+        len(data.get("flashes", [])),
+    )
+    return data
+
+
+# ====== 时间格式化 ======
+
+
+def fmt_time(iso: str) -> str:
+    """ISO 8601 UTC → 北京时间短格式"""
+    if not iso:
+        return ""
     try:
-        logger.info("正在获取: %s (%s)", source, url)
-        feed = feedparser.parse(url)
-        count = 0
-        for entry in feed.entries:
-            if count >= MAX_ARTICLES_PER_SOURCE:
-                break
-            title = entry.get("title", "").strip()
-            link = entry.get("link", "").strip()
-            if title:
-                articles.append({
-                    "source": source,
-                    "title": title,
-                    "link": link,
-                })
-                count += 1
-        logger.info("  -> 获取到 %d 条", count)
-    except Exception as e:
-        logger.error("获取 %s 失败: %s", source, e)
-    return articles
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.astimezone(BJT).strftime("%m/%d %H:%M")
+    except Exception:
+        return iso
 
 
-def fetch_all_news() -> Dict[str, List[Dict[str, str]]]:
-    """获取所有板块的新闻，按板块分组返回"""
-    sections = {
-        "ai": [],
-        "policy": [],
-        "stock": [],
-    }
+# ====== HTML → PDF ======
 
-    for name, url in RSS_FEEDS.items():
-        articles = fetch_source(name, url)
-        if "AIHOT" in name:
-            sections["ai"].extend(articles)
-        elif "人民网" in name:
-            sections["policy"].extend(articles)
-        elif "财联社" in name or "东方财富" in name:
-            sections["stock"].extend(articles)
-        else:
-            sections["ai"].extend(articles)  # fallback
+HTML_HEAD = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 18mm 14mm; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Noto Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;
+    font-size: 10.5pt; line-height: 1.8; color: #1e1e2a;
+  }
+  .header {
+    background: linear-gradient(135deg, #0b1830 0%, #132347 50%, #0d2b55 100%);
+    color: #fff; padding: 28px 36px; border-radius: 6px; margin-bottom: 22px;
+  }
+  .header h1 { font-size: 22pt; font-weight: 700; letter-spacing: 1px; }
+  .header .meta { font-size: 9.5pt; opacity: .82; margin-top: 6px; }
+  .lead {
+    background: #f0f4fe; border-left: 4px solid #0b1830;
+    padding: 12px 16px; margin-bottom: 20px;
+    font-size: 10pt; line-height: 1.7; color: #2a2a3e;
+  }
+  .section-title {
+    font-size: 13pt; font-weight: 700; color: #0b1830;
+    border-bottom: 2px solid #0b1830; padding-bottom: 3px;
+    margin-top: 18px; margin-bottom: 10px;
+  }
+  .card {
+    background: #f7f9fc; border: 1px solid #e4e9f0;
+    border-radius: 5px; padding: 10px 14px; margin-bottom: 7px;
+    page-break-inside: avoid;
+  }
+  .card-title { font-size: 11pt; font-weight: 600; color: #0b1830; margin-bottom: 2px; }
+  .card-title a { color: #0b1830; text-decoration: none; }
+  .card-meta { font-size: 8.5pt; color: #7a7a8a; margin-bottom: 4px; }
+  .card-summary { font-size: 9.5pt; color: #3a3a4e; line-height: 1.7; }
+  .flash-item {
+    font-size: 9.5pt; color: #3a3a4e;
+    padding: 4px 0; border-bottom: 1px dashed #e4e9f0;
+  }
+  .empty { color: #999; font-size: 10pt; padding: 12px 0; }
+  .footer {
+    margin-top: 24px; padding-top: 10px;
+    border-top: 1px solid #d0d5dd; text-align: center;
+    font-size: 8.5pt; color: #999;
+  }
+</style>
+</head>
+<body>
+"""
 
-    for key in sections:
-        logger.info("板块 %s 共 %d 条新闻", key, len(sections[key]))
-    return sections
-
-
-# ==================== AI 摘要 ====================
-
-def build_prompt(sections: Dict[str, List[Dict[str, str]]], today_str: str) -> str:
-    """构建财经主编级结构化提示词"""
-
-    def fmt(articles: List[Dict[str, str]]) -> str:
-        lines = []
-        for i, a in enumerate(articles, 1):
-            line = f"{i}. [{a['source']}] {a['title']}"
-            if a.get("link"):
-                line += f"\n   链接: {a['link']}"
-            lines.append(line)
-        return "\n".join(lines) if lines else "（暂无新闻）"
-
-    ai_text = fmt(sections["ai"])
-    policy_text = fmt(sections["policy"])
-    stock_text = fmt(sections["stock"])
-
-    prompt = f"""你是财经主编，负责每日早报的终审与定稿。
-
-📅 日期：{today_str}
-
-请根据以下新闻素材，严格按照「事件 + 深度提炼」的二级 Markdown 格式输出。
-
-========================================
-【输出格式规范】
-
-每个板块用 ### 开头，板块内每条新闻用 **事件：** 和 **深度提炼：** 两级结构：
-
-### 【AI 前沿观察】
-**事件：** <标题>
-**深度提炼：** <1-2 句话，点明行业影响、技术突破意义或竞争格局>
-
-**事件：** <标题>
-**深度提炼：** <1-2 句话，点明行业影响、技术突破意义或竞争格局>
-
-### 【国内政策速递】
-**事件：** <标题>
-**深度提炼：** <1-2 句话，解读政策意图、受益行业或后续影响>
-
-**事件：** <标题>
-**深度提炼：** <1-2 句话，解读政策意图、受益行业或后续影响>
-
-### 【A股市场风向】
-**事件：** <标题>
-**深度提炼：** <1-2 句话，分析资金动向、板块逻辑或短线情绪>
-
-**事件：** <标题>
-**深度提炼：** <1-2 句话，分析资金动向、板块逻辑或短线情绪>
-
-末尾附加一行来源声明：
-📰 新闻来源：<平台A>、<平台B>、<平台C>
-
-========================================
-【原始新闻素材】
-
-===== AI 板块 =====
-{ai_text}
-
-===== 政策板块 =====
-{policy_text}
-
-===== 股市板块 =====
-{stock_text}"""
-    return prompt
+HTML_TAIL = """<div class="footer">
+  Generated by <strong>AI HOT</strong> &nbsp;·&nbsp; aihot.virxact.com &nbsp;·&nbsp;
+  本报告由机器人自动生成
+</div>
+</body>
+</html>"""
 
 
-def summarize_news(sections: Dict[str, List[Dict[str, str]]]) -> str:
-    """调用 DeepSeek V4 总结新闻"""
-    if not DEEPSEEK_API_KEY:
-        logger.error("未设置 DEEPSEEK_API_KEY 环境变量")
-        sys.exit(1)
-
-    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-    today_str = date.today().strftime("%Y 年 %m 月 %d 日")
-    prompt = build_prompt(sections, today_str)
-
-    logger.info("正在调用 DeepSeek API 进行摘要...")
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是《全球每日早报》的资深财经主编。"
-                        "你以专业、精炼、有洞察力著称，善于从繁杂信息中提炼核心价值。"
-                        "\n\n"
-                        "【输出铁律】\n"
-                        "1. 严格按三大板块输出：【AI 前沿观察】｜【国内政策速递】｜【A股市场风向】\n"
-                        "2. 每条新闻采用「事件 + 深度提炼」二级 Markdown 排版：\n"
-                        "   **事件：** <简明标题>\n"
-                        "   **深度提炼：** <1-2 句，给出有信息增量的解读（行业影响 / 政策意图 / 资金逻辑）>\n"
-                        "3. 语言精炼专业，用简体中文。不做价值评价，只说事实和推演\n"
-                        "4. 每个板块至少输出 3 条，宁缺毋滥\n"
-                        "5. 正文首个字符必须包含「早报」关键词"
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_tokens=3000,
-        )
-        summary = response.choices[0].message.content
-        logger.info("API 调用成功，摘要长度: %d 字符", len(summary))
-        return summary
-    except Exception as e:
-        logger.error("API 调用失败: %s", e)
-        sys.exit(1)
+def _build_cards(items: List[Dict], *, show_cat_label: bool = False) -> str:
+    """构建一组卡片 HTML"""
+    html = ""
+    for it in items:
+        title = it.get("title") or "无标题"
+        url = it.get("url") or it.get("sourceUrl", "")
+        source = it.get("source") or it.get("sourceName", "")
+        summary = it.get("summary", "") or ""
+        published = fmt_time(it.get("publishedAt", ""))
+        cat = it.get("category", "")
+        meta_parts = [s for s in [source, published, CATEGORY_LABEL.get(cat, "")] if s]
+        meta = " · ".join(meta_parts) if meta_parts else ""
+        html += f"""<div class="card">
+<div class="card-title"><a href="{url}">{title}</a></div>
+<div class="card-meta">{meta}</div>
+<div class="card-summary">{summary}</div>
+</div>
+"""
+    return html
 
 
-# ==================== 钉钉推送 ====================
+def generate_pdf_interval(items: List[Dict[str, Any]]) -> str:
+    """生成 interval 模式 PDF"""
+    now = datetime.now(BJT)
+    ts = now.strftime("%Y-%m-%d %H:%M")
+    total = len(items)
 
-def build_markdown(summary: str) -> str:
-    """组装完整的钉钉 Markdown 消息（含封面图 + 大盘图）"""
-    today = date.today()
-    today_str = today.strftime("%Y-%m-%d")
-    weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][today.weekday()]
+    # 按 category 分组
+    grouped: Dict[str, list] = {}
+    for it in items:
+        cat = it.get("category") or "uncategorized"
+        grouped.setdefault(cat, []).append(it)
 
-    # 随机选一张封面图
-    cover = random.choice(COVER_IMAGES)
+    body = ""
+    for cat, cat_items in grouped.items():
+        label = CATEGORY_LABEL.get(cat, cat)
+        body += f'<div class="section-title">{label}（{len(cat_items)}）</div>\n'
+        body += _build_cards(cat_items)
 
-    # 构建消息体
-    lines = [
-        f"![封面]({cover})",
-        "",
-        f"# 🌐 全球每日早报 · {today_str} {weekday_cn}",
-        "",
-        "---",
-        "",
-        summary,
-        "",
-        "---",
-        "### 📈 A股大盘走势",
-        f"![上证指数日K线]({STOCK_CHART_URL})",
-        "",
-        f"*🤖 由 DeepSeek V4 自动生成 | {today_str}*",
-        "",
-        "**早报** · 每日 8:00 推送",
-    ]
-    return "\n".join(lines)
+    if not body:
+        body = '<div class="empty">⏳ 过去 2 小时内暂无新动态</div>'
 
+    html = (
+        HTML_HEAD
+        + f"""<div class="header">
+<h1>🤖 AI HOT · 动态速报</h1>
+<div class="meta">{ts} 更新 · 过去 2 小时 · 共 {total} 条</div>
+</div>
+{body}"""
+        + HTML_TAIL
+    )
 
-def send_dingtalk_markdown(title: str, content: str):
-    """通过钉钉自定义机器人推送 Markdown 消息"""
-    if not DINGTALK_WEBHOOK_URL:
-        logger.error("未设置 DINGTALK_WEBHOOK_URL 环境变量")
-        sys.exit(1)
-
-    payload = {
-        "msgtype": "markdown",
-        "markdown": {
-            "title": title,
-            "text": content,
-        },
-    }
-    headers = {"Content-Type": "application/json"}
-
-    logger.info("正在推送消息到钉钉...")
-    try:
-        resp = requests.post(
-            DINGTALK_WEBHOOK_URL, json=payload, headers=headers, timeout=30
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        if result.get("errcode") != 0:
-            logger.error("钉钉推送失败: %s", result.get("errmsg", "未知错误"))
-            sys.exit(1)
-        logger.info("✅ 钉钉消息推送成功！")
-    except requests.RequestException as e:
-        logger.error("钉钉推送请求失败: %s", e)
-        sys.exit(1)
+    HTML(string=html).write_pdf(PDF_FILENAME)
+    logger.info("PDF 已生成: %s", PDF_FILENAME)
+    return PDF_FILENAME
 
 
-# ==================== 主流程 ====================
+def generate_pdf_daily(data: Dict[str, Any]) -> str:
+    """生成 daily 模式 PDF"""
+    date_str = data.get("date", "")
+    lead = data.get("lead", {})
+    sections = data.get("sections", [])
+    flashes = data.get("flashes", [])
+
+    lead_html = ""
+    if lead and lead.get("leadParagraph"):
+        lead_html = f'<div class="lead">{lead["leadParagraph"]}</div>'
+
+    body = ""
+    for sec in sections:
+        label = sec.get("label", "")
+        items = sec.get("items", [])
+        body += f'<div class="section-title">{label}（{len(items)}）</div>\n'
+        body += _build_cards(items, show_cat_label=False)
+
+    if flashes:
+        body += '<div class="section-title">快讯（{len(flashes)}）</div>\n'
+        for f in flashes:
+            t = f.get("title", "")
+            s = f.get("sourceName", "")
+            t_meta = fmt_time(f.get("publishedAt", ""))
+            body += f'<div class="flash-item">• {t} — {s}　{t_meta}</div>\n'
+
+    if not body:
+        body = '<div class="empty">暂无日报内容</div>'
+
+    html = (
+        HTML_HEAD
+        + f"""<div class="header">
+<h1>📰 AI HOT · AI 日报</h1>
+<div class="meta">{date_str}</div>
+</div>
+{lead_html}
+{body}"""
+        + HTML_TAIL
+    )
+
+    HTML(string=html).write_pdf(PDF_FILENAME)
+    logger.info("PDF 已生成: %s", PDF_FILENAME)
+    return PDF_FILENAME
+
+
+# ====== 主入口 ======
+
 
 def main():
+    parser = argparse.ArgumentParser(description="AI HOT PDF 新闻推送")
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["interval", "daily"],
+        help="interval=每2小时动态 / daily=日报",
+    )
+    args = parser.parse_args()
+
     logger.info("=" * 50)
-    logger.info("  🌐 全球每日早报机器人（定制版）启动")
+    logger.info("  🤖 AI HOT 双轨 PDF 推送 → mode=%s", args.mode)
     logger.info("=" * 50)
 
-    # 1. 获取新闻
-    sections = fetch_all_news()
-    total = sum(len(v) for v in sections.values())
-    if total == 0:
-        logger.error("未获取到任何新闻，终止运行")
-        sys.exit(1)
-    logger.info("共获取到 %d 条新闻", total)
+    if args.mode == "interval":
+        items = fetch_interval()
+        generate_pdf_interval(items)
+    else:
+        data = fetch_daily()
+        generate_pdf_daily(data)
 
-    # 2. 调用 AI 总结
-    summary = summarize_news(sections)
-
-    # 3. 组装富文本消息
-    today_str = date.today().strftime("%Y-%m-%d")
-    title = f"全球每日早报 · {today_str}"
-    message = build_markdown(summary)
-
-    # 4. 推送到钉钉
-    send_dingtalk_markdown(title, message)
-    logger.info("✅ 全部任务完成！")
+    logger.info("✅ 完成，输出文件: %s", PDF_FILENAME)
 
 
 if __name__ == "__main__":

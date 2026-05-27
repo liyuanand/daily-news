@@ -1,14 +1,26 @@
-name: 全球每日早报
+name: AI HOT 双轨新闻推送
 
 on:
   schedule:
-    # 每两小时运行一次
+    # 每 2 小时 → interval 模式（北京时间偶数整点）
     - cron: "0 */2 * * *"
-  workflow_dispatch: # 支持手动触发测试
+    # 每天 UTC 13:00 = 北京时间 21:00 → daily 模式
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 运行模式
+        required: true
+        default: interval
+        type: choice
+        options:
+          - interval
+          - daily
 
 jobs:
-  run-news-bot:
+  run-and-send:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,11 +29,48 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: 安装依赖
-        run: pip install -r requirements.txt
+      - name: 安装系统依赖（weasyprint + 中文字体）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpango-1.0-0 libpangocairo-1.0-0 \
+            libgdk-pixbuf2.0-dev libffi-dev shared-mime-info
+          sudo apt-get install -y fonts-noto-cjk
 
-      - name: 运行新闻推送机器人
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
-        run: python news_bot.py
+      - name: 安装 Python 依赖
+        run: pip install weasyprint requests
+
+      - name: 确定运行模式
+        id: mode
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            MODE="${{ github.event.inputs.mode }}"
+          else
+            HOUR=$(TZ=Asia/Shanghai date +%H)
+            if [ "$HOUR" = "21" ]; then
+              MODE="daily"
+            else
+              MODE="interval"
+            fi
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+      - name: 运行新闻机器人
+        run: python news_bot.py --mode ${{ steps.mode.outputs.mode }}
+
+      - name: 通过邮件发送 PDF
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          to: 1484023109@qq.com
+          from: ${{ secrets.EMAIL_USERNAME }}
+          subject: AI HOT ${{ steps.mode.outputs.mode == 'daily' && '日报' || '动态简报' }} · ${{ github.run_id }}
+          content_type: text/html
+          body: |
+            <h3>📎 请查收附件中的 AI 新闻报告</h3>
+            <p>模式：${{ steps.mode.outputs.mode == 'daily' && '📰 AI 日报' || '⚡ 动态速报' }}</p>
+            <p>由 GitHub Actions 自动生成并推送</p>
+          attachments: AI_Report.pdf
