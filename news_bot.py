@@ -65,6 +65,20 @@ def fetch_interval() -> List[Dict[str, Any]]:
     return items
 
 
+def fetch_selected_ids() -> set:
+    """获取过去 2 小时精选条目的 ID 集合（用于标题标红）"""
+    since = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    url = f"{AIHOT_BASE}/api/public/items?mode=selected&since={since}&take=100"
+    logger.info("请求精选 API: %s", url)
+    resp = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+    resp.raise_for_status()
+    ids = {it["id"] for it in resp.json().get("items", []) if it.get("id")}
+    logger.info("获取到 %d 个精选 ID", len(ids))
+    return ids
+
+
 def fetch_daily() -> Dict[str, Any]:
     """获取当天 AI 日报（北京 08:00 还未生成时自动降级到昨天）"""
     url = f"{AIHOT_BASE}/api/public/daily"
@@ -170,7 +184,7 @@ HTML_HEAD = """<!DOCTYPE html>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     font-family: Georgia, 'SimSun', 'Songti SC', 'Noto Serif SC', serif;
-    font-size: 10pt; line-height: 1.5; color: #1a1a1a; background: #FCFBF9;
+    font-size: 13.5pt; line-height: 1.6; color: #1a1a1a; background: #FCFBF9;
   }
 
   /* ===== WSJ 报头 ===== */
@@ -196,7 +210,7 @@ HTML_HEAD = """<!DOCTYPE html>
 
   /* ===== 板块标题（酒红色） ===== */
   .section-title {
-    font-size: 11.5pt; font-weight: 700; color: #A82315;
+    font-size: 18pt; font-weight: 700; color: #A82315;
     border-bottom: 1px solid #d5d0c8; padding-bottom: 3px;
     margin-top: 16px; margin-bottom: 8px;
     font-family: Georgia, 'SimSun', serif;
@@ -208,8 +222,10 @@ HTML_HEAD = """<!DOCTYPE html>
     border-bottom: 1px solid #ece8e2; padding: 7px 0; margin: 0;
     page-break-inside: avoid;
   }
-  .card-title { font-size: 10.5pt; font-weight: 600; color: #1a1a1a; margin-bottom: 1px; }
+  .card-title { font-size: 15pt; font-weight: 600; color: #1a1a1a; margin-bottom: 2px; }
   .card-title a { color: #1a1a1a; text-decoration: none; }
+  .card-title-selected { font-size: 15pt; font-weight: 700; color: #A82315; margin-bottom: 2px; }
+  .card-title-selected a { color: #A82315; text-decoration: none; }
   .card-meta {
     font-size: 8pt; color: #999; font-family: Georgia, serif;
     font-style: italic; margin-bottom: 2px;
@@ -252,8 +268,8 @@ HTML_TAIL = """<div class="footer">
 </html>"""
 
 
-def _build_cards(items: List[Dict], *, show_cat_label: bool = False) -> str:
-    """构建一组卡片 HTML（含自动关键词高亮）"""
+def _build_cards(items: List[Dict], *, selected_ids: set = None, all_selected: bool = False) -> str:
+    """构建一组卡片 HTML（含自动关键词高亮 + 精选标红）"""
     html = ""
     for it in items:
         title = it.get("title") or "无标题"
@@ -264,8 +280,10 @@ def _build_cards(items: List[Dict], *, show_cat_label: bool = False) -> str:
         cat = it.get("category", "")
         meta_parts = [s for s in [source, published, CATEGORY_LABEL.get(cat, "")] if s]
         meta = " · ".join(meta_parts) if meta_parts else ""
+        is_selected = all_selected or (selected_ids and it.get("id") in selected_ids)
+        cls = "card-title-selected" if is_selected else "card-title"
         html += f"""<div class="card">
-<div class="card-title"><a href="{url}">{highlight_text(title)}</a></div>
+<div class="{cls}"><a href="{url}">{highlight_text(title)}</a></div>
 <div class="card-meta">{meta}</div>
 <div class="card-summary">{highlight_text(summary)}</div>
 </div>
@@ -276,13 +294,14 @@ def _build_cards(items: List[Dict], *, show_cat_label: bool = False) -> str:
 def generate_pdf_interval(
     items: List[Dict[str, Any]],
     cls_items: List[Dict[str, str]] = None,
+    selected_ids: set = None,
 ) -> str:
     """生成 interval 模式 PDF"""
     now = datetime.now(BJT)
     ts = now.strftime("%Y-%m-%d %H:%M")
     total = len(items) + len(cls_items or [])
 
-    # AIHOT — 按 category 分组
+    # AIHOT — 按 category 分组（精选条目标题标红）
     body = ""
     grouped: Dict[str, list] = {}
     for it in items:
@@ -291,7 +310,7 @@ def generate_pdf_interval(
     for cat, cat_items in grouped.items():
         label = CATEGORY_LABEL.get(cat, cat)
         body += f'<div class="section-title">{label}（{len(cat_items)}）</div>\n'
-        body += _build_cards(cat_items)
+        body += _build_cards(cat_items, selected_ids=selected_ids)
 
     # 财经快讯板块
     if cls_items:
@@ -344,7 +363,7 @@ def generate_pdf_daily(data: Dict[str, Any]) -> str:
         label = sec.get("label", "")
         items = sec.get("items", [])
         body += f'<div class="section-title">{label}（{len(items)}）</div>\n'
-        body += _build_cards(items, show_cat_label=False)
+        body += _build_cards(items, all_selected=True)
 
     if flashes:
         body += '<div class="section-title">快讯（{len(flashes)}）</div>\n'
@@ -394,8 +413,9 @@ def main():
 
     if args.mode == "interval":
         items = fetch_interval()
+        selected_ids = fetch_selected_ids()
         cls_items = fetch_finance_flash()
-        generate_pdf_interval(items, cls_items)
+        generate_pdf_interval(items, cls_items, selected_ids)
     else:
         data = fetch_daily()
         generate_pdf_daily(data)
