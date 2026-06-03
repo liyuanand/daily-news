@@ -2,8 +2,8 @@ name: AI HOT 双轨新闻推送
 
 on:
   schedule:
-    # 每 2 小时 → interval 模式（北京时间偶数整点）
-    - cron: "0 */2 * * *"
+    # 北京时间 8点、12点、17点 → interval 模式
+    - cron: "0 0,4,9 * * *"
     # 每天 UTC 13:00 = 北京时间 21:00 → daily 模式
     - cron: "0 13 * * *"
   workflow_dispatch:
@@ -20,6 +20,8 @@ on:
 jobs:
   run-and-send:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -56,9 +58,20 @@ jobs:
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
 
       - name: 运行新闻机器人
+        id: news_bot
         run: python news_bot.py --mode ${{ steps.mode.outputs.mode }}
 
+      - name: 提交去重记录
+        if: steps.news_bot.outputs.pdf_generated == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pushed_ids.txt
+          git diff --staged --quiet || git commit -m "更新去重记录"
+          git push
+
       - name: 通过邮件发送 PDF
+        if: steps.news_bot.outputs.pdf_generated == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.qq.com

@@ -6,6 +6,7 @@ AI HOT 双轨 PDF 新闻推送机器人
 - 生成精美中文 PDF 供邮件发送
 """
 
+import hashlib
 import os
 import sys
 import argparse
@@ -42,6 +43,7 @@ CATEGORY_LABEL = {
 
 BJT = timezone(timedelta(hours=8))
 PDF_FILENAME = "AI_Report.pdf"
+PUSHED_IDS_FILE = "pushed_ids.txt"
 
 # ====== 高亮关键词 ======
 
@@ -171,6 +173,70 @@ def highlight_text(text: str) -> str:
     for w in AI_WORDS:
         text = text.replace(w, f'<span class="highlight-tech">{w}</span>')
     return text
+
+
+# ====== 去重机制 ======
+
+
+def load_pushed_ids() -> set:
+    """加载已推送的文章 ID 集合"""
+    if not os.path.exists(PUSHED_IDS_FILE):
+        return set()
+    with open(PUSHED_IDS_FILE, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f if line.strip())
+
+
+def save_pushed_ids(new_ids: set) -> None:
+    """将新推送的文章 ID 追加写入去重文件"""
+    if not new_ids:
+        return
+    with open(PUSHED_IDS_FILE, "a", encoding="utf-8") as f:
+        for id_ in sorted(new_ids):
+            f.write(f"{id_}\n")
+    logger.info("已写入 %d 条新 ID 到去重文件", len(new_ids))
+
+
+def clear_pushed_ids() -> None:
+    """清空去重文件（每天首次运行时调用）"""
+    with open(PUSHED_IDS_FILE, "w", encoding="utf-8") as f:
+        f.write("")
+    logger.info("已清空去重记录 (%s)", PUSHED_IDS_FILE)
+
+
+def should_reset_dedup() -> bool:
+    """判断是否需要重置去重文件（每天 8 点或文件跨天）"""
+    now_bjt = datetime.now(BJT)
+    if now_bjt.hour == 8:
+        return True
+    if os.path.exists(PUSHED_IDS_FILE):
+        mtime = os.path.getmtime(PUSHED_IDS_FILE)
+        file_date = datetime.fromtimestamp(mtime, tz=BJT).date()
+        if file_date != now_bjt.date():
+            logger.info("去重文件来自 %s，当前 %s，自动重置", file_date, now_bjt.date())
+            return True
+    return False
+
+
+def get_item_key(item: Dict) -> str:
+    """获取 AIHOT 文章的唯一标识（id 优先，fallback 为标题 hash）"""
+    if item.get("id"):
+        return f"aihot:{item['id']}"
+    title = item.get("title", "无标题")
+    return f"aihot:{hashlib.md5(title.encode()).hexdigest()}"
+
+
+def get_finance_key(item: Dict) -> str:
+    """获取财经快讯的唯一标识（基于标题 hash）"""
+    title = item.get("title", "")
+    return f"finance:{hashlib.md5(title.encode()).hexdigest()}"
+
+
+def set_github_output(key: str, value: str) -> None:
+    """设置 GitHub Actions 步骤输出变量"""
+    output_file = os.environ.get("GITHUB_OUTPUT")
+    if output_file:
+        with open(output_file, "a") as f:
+            f.write(f"{key}={value}\n")
 
 
 # ====== HTML → PDF ======
@@ -412,13 +478,41 @@ def main():
     logger.info("=" * 50)
 
     if args.mode == "interval":
+        # 每天首次运行（8 点）或跨天时重置去重文件
+        if should_reset_dedup():
+            clear_pushed_ids()
+
+        pushed_ids = load_pushed_ids()
+        logger.info("已加载 %d 条去重记录", len(pushed_ids))
+
         items = fetch_interval()
         selected_ids = fetch_selected_ids()
         cls_items = fetch_finance_flash()
-        generate_pdf_interval(items, cls_items, selected_ids)
+
+        # 去重过滤：剔除已推送的文章
+        new_items = [it for it in items if get_item_key(it) not in pushed_ids]
+        new_cls = [it for it in cls_items if get_finance_key(it) not in pushed_ids]
+
+        total_new = len(new_items) + len(new_cls)
+        total_skipped = len(items) + len(cls_items) - total_new
+        logger.info("去重结果: %d 条新内容, %d 条已推送（跳过）", total_new, total_skipped)
+
+        if total_new == 0:
+            logger.info("⏳ 没有新内容，跳过 PDF 生成与邮件发送")
+            set_github_output("pdf_generated", "false")
+            return
+
+        generate_pdf_interval(new_items, new_cls, selected_ids)
+
+        # 将新推送的文章 ID 写入去重文件
+        new_ids = {get_item_key(it) for it in new_items}
+        new_ids |= {get_finance_key(it) for it in new_cls}
+        save_pushed_ids(new_ids)
+        set_github_output("pdf_generated", "true")
     else:
         data = fetch_daily()
         generate_pdf_daily(data)
+        set_github_output("pdf_generated", "true")
 
     logger.info("✅ 完成，输出文件: %s", PDF_FILENAME)
 
