@@ -2,8 +2,8 @@ name: AI HOT 双轨新闻推送
 
 on:
   schedule:
-    # 北京时间 8点、12点、17点 → interval 模式
-    - cron: "0 0,4,9 * * *"
+    # 北京时间 8点、16点 → interval 模式
+    - cron: "0 0,8 * * *"
     # 每天 UTC 13:00 = 北京时间 21:00 → daily 模式
     - cron: "0 13 * * *"
   workflow_dispatch:
